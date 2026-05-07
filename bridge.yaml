@@ -1,0 +1,321 @@
+globals:
+  - id: dev_short_name
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+
+  - id: last_lora_msg_time
+    type: unsigned long
+    restore_value: no
+    initial_value: '0'
+
+
+esphome:
+  name: bridge
+  name_add_mac_suffix: false
+  includes: 
+    - custom_utils.h
+  on_boot:
+    - priority: 650
+      then:
+        - lambda: |-
+            // keep only the mac address part for a short name
+            std::string full_name = "bridge"; App.get_name();
+            // if(full_name.length() >= 6 ){
+            //  id(dev_short_name) = full_name.substr(full_name.length() - 6);
+            // } else {
+            //  id(dev_short_name) = full_name;
+            // }
+            // for the bridge, just use the node name - it's just bridge
+            id(dev_short_name) = full_name;
+
+            ESP_LOGD("on_boot", "Powering on Vext rail...");
+        - output.turn_on: vext_ctrl   # GPIO36 LOW → PFET on → Vext rail live
+        - output.turn_on: lora_pa_power # Set LORA_PA_POWER HIGH to enable
+        - output.turn_on: lora_pa_csd # Set PA_CSD HIGH to enable the PA for both TX and RX modes
+        - delay: 100ms                # Stabilization time before I2C init
+        - lambda: |-
+            ESP_LOGD("on_boot", "Vext rail should be on. Continuing with boot sequence...");
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+logger:
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true
+
+web_server:
+  port: 80  
+
+mqtt:
+  broker: !secret mqtt_host
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  topic_prefix: "cclora/bridge"
+
+output:
+  - platform: gpio
+    id: vext_ctrl
+    pin:
+      number: 36
+      mode:
+        output: true
+      inverted: true 
+
+  # radio control pins: https://github.com/HelTecAutomation/Heltec_ESP32/blob/master/src/radio/radio.c
+  - platform: gpio
+    id: lora_pa_csd # PA_CSD - set high to transmit or listen
+    pin: 
+      number: 2
+      mode:
+        output: true
+
+  - platform: gpio
+    id: lora_pa_power # LORA_PA_POWER - set high for transmit or listen
+    pin:
+      number: 7
+      mode:
+        output: true
+
+  - platform: gpio
+    id: lora_pa_ctx # LORA_PA_CTX - set high for transmit and low for listen.
+    pin:
+      number: 5
+      mode:
+        output: true
+
+i2c:
+  - id: display_i2c_bus
+    sda: 17
+    scl: 18
+    setup_priority: 600
+
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x64"
+    reset_pin: 21
+    i2c_id: display_i2c_bus
+    address: 0x3C
+    update_interval: 1s
+    lambda: |-
+       it.print(0, 0, id(mono_12), App.get_name().c_str());
+       it.printf(50, 0, id(mono_12), "up: %0.f", id(dev_uptime).state);
+
+       if ( id(last_lora_msg).state.length() > 0 ){
+        std::string msg = id(last_lora_msg).state + " @ " + std::to_string(id(last_lora_msg_time));
+        it.printf(0, 14, id(mono_12), msg.substr(0, 18).c_str());
+        if ( msg.length() > 18 ) {
+          it.printf(0, 28, id(mono_12), msg.substr(18, 18).c_str());
+        }
+        if ( msg.length() > 36) {
+          it.printf(0, 40, id(mono_12), msg.substr(36, 18).c_str());
+        }
+       }
+       
+
+font:
+  - file: "gfonts://Roboto+Mono"
+    id: mono_12
+    size: 12
+
+sensor:
+  - platform: uptime
+    name: "uptime"
+    id: "dev_uptime"
+    update_interval: 1s
+    internal: true
+
+button:
+  - platform: restart
+    name: "Restart"
+    id: restart_btn
+    internal: true
+
+# define a text sensor to hold the last received message for display
+text_sensor:
+  - platform: template
+    name: "Last LoRa Message"
+    id: last_lora_msg
+    # internal: true
+
+  - platform: template
+    name: "Last Lora Signal"
+    id: last_lora_signal
+    # internal: true
+
+
+# =============================================================================
+# SPI BUS — SX1262 LoRa (Heltec V3/V4 internal traces, no external wiring)
+# =============================================================================
+spi:
+  clk_pin:  GPIO9
+  mosi_pin: GPIO10
+  miso_pin: GPIO11
+
+
+# =============================================================================
+# SX1262 LoRa Radio
+# =============================================================================
+sx126x:
+  id: lora_radio
+  hw_version: sx1262
+
+  # SPI & control pins — V3 and V4 share the same pinout
+  cs_pin:   GPIO8    # SPI chip select (NSS)
+  rst_pin:  GPIO12   # Hardware reset
+  busy_pin: GPIO13   # BUSY line — SX1262 holds HIGH during any internal
+                     # operation; the ESPHome driver polls before each SPI
+                     # transaction to avoid corrupting in-flight commands.
+  dio1_pin: GPIO14   # Interrupt output — signals TxDone / RxDone / Timeout.
+                     # IMPORTANT: Heltec's own docs and schematics sometimes
+                     # label this "DIO0". That is a documentation error.
+                     # The SX1262 chip has no DIO0; its first interrupt pin
+                     # is DIO1. GPIO14 is correctly wired to SX1262 pin DIO1.
+
+  # ---- RF switch: REQUIRED on Heltec V3/V4 ----------------------------------
+  # The board includes an RF antenna switch (PE4259 on V3, UPG2179 on some V4
+  # revisions) that routes the signal path to either the PA (TX) or LNA (RX).
+  # rf_switch: true instructs the SX1262 to drive DIO2 HIGH automatically
+  # when entering TX mode, toggling the switch to the PA path.
+  #
+  # Without this setting the switch remains in RX position during TX.
+  # Result: transmitted signal is attenuated ~20-30 dB. Effective range
+  # drops from the expected 1-5 km to only a few metres indoors.
+  rf_switch: true # not sure if this works or not, still need to manually toggle the lora_pa_ctx pins
+
+  # ---- TCXO: REQUIRED on Heltec V3/V4 --------------------------------------
+  # The board uses a Temperature Compensated Crystal Oscillator (TCXO) as the
+  # SX1262 reference clock source, powered by DIO3 at 1.8V.
+  # Without this setting the chip attempts to use a passive crystal that is
+  # not populated on the board, resulting in failed initialisation or severe
+  # frequency instability (especially across the temperature range expected
+  # in outdoor cabin installations).
+  tcxo_voltage: 1_8V
+  tcxo_delay: 5ms   # Stabilisation time after TCXO power-on
+
+  modulation: LORA
+  frequency: 915000000   # 915 MHz — US ISM band (902-928 MHz)
+                          # Change to 868000000 for EU deployments
+
+  # SF9 chosen for this deployment:
+  #   Farthest cabin ≈ 530m with partial tree cover.
+  #   SF9 @ 125kHz BW gives a strong link budget with manageable air-time.
+  #   A 35-byte packet at SF9 occupies ≈ 215ms — well within ISM duty limits.
+  #   Step up to SF10 only if a specific cabin has consistently poor RSSI.
+  spreading_factor: 9
+  bandwidth:   125_0kHz
+  coding_rate: CR_4_5
+
+  # 14 dBm (~25mW) is ample for all cabins at these distances and keeps the
+  # PA cool for long-term reliability. Raise to 20 dBm only for the farthest
+  # cabin if signal margin is thin after physical deployment.
+  pa_power: 20
+
+  crc_enable: true           # Drop corrupted packets at the radio layer
+  sync_value: [0x14, 0x24]   # Private network — filters out LoRaWAN traffic
+  preamble_size: 12          # Longer than default (8) to aid receiver lock-on
+
+  # nodes only transmit. rx_start: false (the default) is explicit here
+  # to document intent and prevent accidental receiver activation.
+  rx_start: true
+
+  on_packet:
+    then:
+      - lambda: |-
+
+          std::string pkt(x.begin(), x.end());
+          ESP_LOGI("lora_rx", "RX [%d bytes] RSSI=%.0f dBm SNR=%.1f dB: %s",
+                   (int)x.size(), rssi, snr, pkt.c_str());
+
+          LoraMsg msg = parse_lora_msg(pkt, rssi, snr);
+
+          if (!msg.valid){
+            ESP_LOGW("lora_rx", "Could not parse message: %s", pkt.c_str());
+            return;
+          }
+
+          if ( msg.command == "ping" ){
+
+            if ( msg.sender.length() > 0 ) {
+              ESP_LOGI("ping_pong", "Received ping from %s, responding with pong...", msg.sender.c_str());
+              id(send_pong).execute(msg.sender, rssi, snr); // execute the send_pong script with the target, rssi, and snr values
+            } else {
+              ESP_LOGW("ping_pong", "Received ping with no sender ID, cannot respond.");
+            }
+
+          }
+
+          // set the last_lora_msg to pkt string
+          char buf[256];
+          snprintf(buf, sizeof(buf), "%s|%.0f|%.1f", pkt.c_str(), rssi, snr);
+          id(last_lora_msg).publish_state(buf);
+          id(last_lora_msg_time) = (unsigned long)(millis() / 1000);
+
+          
+
+
+
+interval:
+  # watchdog interval — restarts the node every 24h to recover from any unforeseen issues in the field.
+  - interval: 24h
+    startup_delay: 24h
+    then:
+      - logger.log:
+          level: INFO
+          format: "24h watchdog — restarting"
+      - delay: 2s
+      - button.press: restart_btn
+
+
+
+
+# =============================================================================
+# Custom Scripts
+# =============================================================================
+
+script:
+  # transmit a lora message with the given string as payload.
+  - id: send_lora_msg
+    mode: queued
+    parameters:
+      msg: string
+    then:
+      - sx126x.set_mode_standby: # ensure the radio is in standby before toggling the PA for transmission
+      - delay: 10ms
+      - sx126x.set_mode_tx: # set the radio to TX mode, which should automatically set the RF switch to the PA path if rf_switch is working correctly
+      - output.turn_on: lora_pa_ctx
+      - delay: 10ms
+      - sx126x.send_packet:
+          data: !lambda |-
+            ESP_LOGD("lora_tx", "TX: %s", msg.c_str());
+            return std::vector<uint8_t>(msg.begin(), msg.end());
+      - delay: 50ms
+      - output.turn_off: lora_pa_ctx
+      - delay: 10ms
+      - sx126x.set_mode_rx: # return to RX mode after transmission to listen for
+
+  - id: send_pong
+    parameters:
+      target: string
+      rssi: float
+      snr: float
+    then:
+      - delay: 1s
+      - lambda: |-
+          // message format: "/pong|sender|sender_time|target|rssi|snr"
+          char buf[128];
+          snprintf(buf, sizeof(buf), 
+            "pong|%s|%lu|%s|%.0f|%.1f", 
+            id(dev_short_name).c_str(),
+            (unsigned long)( millis()/1000UL ), 
+            target.c_str(),
+            rssi,
+            snr
+          );
+          std::string pong_msg = std::string(buf);
+          id(send_lora_msg).execute(pong_msg);

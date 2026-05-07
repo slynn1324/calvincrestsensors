@@ -1,0 +1,764 @@
+globals:
+  - id: dev_short_name
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+
+  - id: status_msg
+    type: std::string
+    restore_value: no
+    initial_value: '"initializing..."'
+
+  - id: clear_status_after
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: ml_status_line_1
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+
+  - id: ml_status_line_2
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+  
+  - id: ml_status_line_3
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+
+  - id: ml_status_clear_after
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: last_lora_msg
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+
+  - id: tx_delay_ms
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: tx_in_progress
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: current_a_sum
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+
+  - id: current_b_sum
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+
+  - id: current_a_count
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: current_b_count
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: config_logs
+    type: std::vector<std::string>
+    restore_value: no
+
+  - id: replay_config_index
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+
+esphome:
+  name: ccsnode
+  name_add_mac_suffix: true 
+  includes: 
+    - custom_utils.h
+  on_boot:
+    - priority: 650
+      then:
+        - lambda: |-
+            // keep only the mac address part for a short name
+            std::string full_name = App.get_name();
+            if(full_name.length() >= 6 ){
+              id(dev_short_name) = full_name.substr(full_name.length() - 6);
+            } else {
+              id(dev_short_name) = full_name;
+            }
+            ESP_LOGD("on_boot", "Assigned dev_short_name: %s", id(dev_short_name).c_str());
+            ESP_LOGD("on_boot", "Powering on Vext rail...");
+        - output.turn_on: vext_ctrl   # GPIO36 LOW → PFET on → Vext rail live
+        - output.turn_on: lora_pa_power # Set LORA_PA_POWER HIGH to enable
+        - output.turn_on: lora_pa_csd # Set PA_CSD HIGH to enable the PA for both TX and RX modes
+        - delay: 100ms                # Stabilization time before I2C init
+        - lambda: |-
+            ESP_LOGD("on_boot", "vext_ctrl, lora_pa_power, and lora_pa_csd should be on. Continuing with boot sequence...");
+       
+  
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+  on_message:
+    level: DEBUG
+    then:
+      - lambda: |-
+          if ( level == 4 ){ // capture CONFIG-level messages into the config log buffer
+            std::string entry = std::string(message);
+            std::string stripped = entry.length() < 7 ? entry : entry.substr(7, entry.length()-4); // strip color codes
+            //id(config_logs).push_back(entry.length() < 7 ? entry : entry.substr(7, entry.length()-4)); // strip color codes
+
+            std::string prefix = "";
+            size_t prefix_end = stripped.find("]: ");
+            if (prefix_end != std::string::npos) {
+              prefix = stripped.substr(0, prefix_end +3); // include the "]: " in the prefix
+            }
+
+            std::string remaining = stripped;
+            size_t pos = 0;
+            while ((pos = remaining.find("\n")) != std::string::npos) {
+              std::string line = remaining.substr(0, pos);
+              if ( !line.empty() ){
+                id(config_logs).push_back(line);
+              }
+              // after the first line, prepend prefix to remaining content
+              remaining = prefix + remaining.substr(pos + 1);
+            }
+            // push the final (or only) line
+            if (!remaining.empty() ){
+              id(config_logs).push_back(remaining);}
+          }
+      - ble_server.characteristic.set_value:
+          id: ble_log_char
+          value: 
+            data: !lambda |-
+              std::string msg = message;
+              return std::vector<uint8_t>(msg.length() < 7 ? msg.begin() : msg.begin()+7, msg.length() < 7 ? msg.end() : msg.end()-4);
+      - ble_server.characteristic.notify:
+          id: ble_log_char
+
+esp32_ble_server:
+  services:
+    - uuid: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+      characteristics:
+        - uuid: "a1b2c3d4-e5f6-7890-abcd-ef1234567891"
+          id: ble_log_char
+          read: true
+          notify: true
+          description: log
+          value:
+            data: ""
+            type: string
+        - uuid: "a1b2c3d4-e5f6-7890-abcd-ef1234567892"
+          id: ble_state_char
+          read: true
+          notify: true
+          description: state
+          value:
+            data: ""
+            type: string
+        - uuid: "a1b2c3d4-e5f6-7890-abcd-ef1234567893"
+          id: ble_cmd_char
+          read: false
+          write: true
+          description: cmd
+          value:
+            data: ""
+            type: string
+          on_write:
+            then:
+              - lambda: |-
+                  ESP_LOGD("ble_cmd_char", "Write received on cmd characteristic, length: %d", (int)x.size());
+                  // read the std::vector<uint8_t> from 'x' and convert it to a string
+                  if (x.size() > 0) {
+                    std::string cmd(x.begin(), x.end());
+                    ESP_LOGD("ble_cmd_char", "Received BLE command: %s", cmd.c_str());
+                    
+                    if (cmd == "log_config") {
+                      
+                      ESP_LOGI("ble_cmd_char", "Received log_config command, replaying config logs");
+                      id(replay_config_logs).execute();
+                    
+                    } else if ( cmd == "ping" ){
+                    
+                      ESP_LOGI("ble_cmd_char", "Received ping command over BLE, running ping script...");
+                      id(ping).execute();
+
+                    } else if ( cmd == "update_sensors" ){
+
+                      ESP_LOGI("ble_cmd_char", "Received update_sensors command over BLE, running sensor_update_script...");
+                      id(sensor_update_script).execute();
+                    
+                    } else if ( cmd == "restart" ){
+                    
+                      ESP_LOGI("ble_cmd_char", "Received restart command over BLE, running restart script...");
+                      id(restart_script).execute();
+
+                    } else {
+                      ESP_LOGW("ble_cmd_char", "Unknown command received: %s", cmd.c_str());
+                    }
+                  }
+
+
+
+output:
+  - platform: gpio
+    id: vext_ctrl # Controls the PFET that powers the Vext rail (which includes the SX1262 and display)
+    pin:
+      number: 36
+      mode:
+        output: true
+      inverted: true 
+
+  # radio control pins: https://github.com/HelTecAutomation/Heltec_ESP32/blob/master/src/radio/radio.c
+  - platform: gpio
+    id: lora_pa_csd # PA_CSD - set high to transmit or listen
+    pin: 
+      number: 2
+      mode:
+        output: true
+
+  - platform: gpio
+    id: lora_pa_power # LORA_PA_POWER - set high for transmit or listen
+    pin:
+      number: 7
+      mode:
+        output: true
+
+  - platform: gpio
+    id: lora_pa_ctx # LORA_PA_CTX - set high for transmit and low for listen
+    pin:
+      number: 5
+      mode:
+        output: true
+
+i2c:
+  - id: display_i2c_bus
+    sda: 17
+    scl: 18
+    setup_priority: 600
+
+display:
+  - platform: ssd1306_i2c
+    id: oled_display
+    model: "SSD1306 128x64"
+    reset_pin: 21
+    i2c_id: display_i2c_bus
+    address: 0x3C
+    update_interval: never
+    lambda: |-
+      it.print(0, 0, id(mono_12), id(dev_short_name).c_str());
+      it.printf(50, 0, id(mono_12), "up:%lu", (unsigned long)(millis()/1000UL));
+
+      if ( id(ml_status_line_1).length() > 0 ){
+        it.printf(0, 14, id(mono_12), "%s", id(ml_status_line_1).c_str());
+        it.printf(0, 28, id(mono_12), "%s", id(ml_status_line_2).c_str());
+        it.printf(0, 42, id(mono_12), "%s", id(ml_status_line_3).c_str());
+      } else {
+
+        // don't show sensors until we've read them at least once so they don't show nan.
+        if ( id(last_lora_msg).length() > 0 ){
+          it.printf(0, 14, id(mono_12), "m%0.1f|t%0.1f", id(mcu_temperature).state, id(temperature).state);
+          it.printf(0, 28, id(mono_12), "c%0.1f|%0.1f  w%0.1f", id(current_a).state, id(current_b).state, id(water_flow_total).state);
+        }
+
+        it.print(0, 42, id(mono_12), id(status_msg).c_str());
+      }
+
+font:
+  - file: "gfonts://Roboto+Mono"
+    id: mono_12
+    size: 12
+
+one_wire:
+  - platform: gpio
+    pin: 47
+
+sensor:
+
+  - platform: dallas_temp
+    name: "Temperature"
+    id: "temperature"
+    update_interval: never
+
+  - platform: internal_temperature
+    name: "MCU Temperature"
+    id: "mcu_temperature"
+    update_interval: never
+
+  - platform: ct_clamp
+    name: "Current A"
+    id: "current_a"
+    sensor: current_a_adc
+    update_interval: 10s
+    sample_duration: 500ms
+    filters:
+      - calibrate_linear:
+          - 0.01 -> 0
+          - 0.15 -> 41.66 # 0.15V across the CT corresponds to 41.66A (measure a known source to calibrate)
+      - lambda: |-
+          return x < 0.1 ? 0.0 : x; // Apply a noise threshold to filter out small readings
+    on_value:
+      then:
+        - lambda: |-
+            // Accumulate sum and count for averaging
+            if ( !std::isnan(x) ){
+                id(current_a_sum) += x;
+                id(current_a_count) += 1;
+            } else {
+              ESP_LOGW("ct_clamp", "Received NaN value from current_a_adc, ignoring");
+            }
+
+  - platform: ct_clamp
+    name: "Current B"
+    id: "current_b"
+    sensor: current_b_adc
+    update_interval: 10s
+    sample_duration: 500ms
+    filters:
+      - calibrate_linear:
+          - 0.01 -> 0
+          - 0.15 -> 41.66 # 0.15V across the CT corresponds to 41.66A (measure a known source to calibrate)
+      - lambda: |-
+          return x < 0.1 ? 0.0 : x; // Apply a noise threshold to filter out small readings
+    on_value:
+      then:
+        - lambda: |-
+            // Accumulate sum and count for averaging
+            if ( !std::isnan(x) ){
+                id(current_b_sum) += x;
+                id(current_b_count) += 1;
+            } else {
+              ESP_LOGW("ct_clamp", "Received NaN value from current_b_adc, ignoring");
+            }
+
+  - platform: adc
+    pin: 3
+    id: current_a_adc
+    attenuation: auto
+    update_interval: never
+    internal: true
+
+  - platform: adc
+    pin: 4
+    id: current_b_adc
+    attenuation: auto
+    update_interval: never
+    internal: true    
+
+  - platform: pulse_meter
+    name: "Water Flow Meter"
+    id: water_flow_meter
+    pin:
+      number: 48
+      mode:
+        input: true
+        pullup: true
+      inverted: true # dry contact pulls to GND -> active low pulse
+    unit_of_measurement: "L/min"
+    internal_filter: 10ms # debounce time for the pulse input, adjust based on the expected pulse width from the flow meter
+    internal_filter_mode: PULSE # filter on pulse width, not edge-to-edge
+    timeout: 30s # if no pulses for 30s, report 0 flow
+    filters:
+      - multiply: 0.1 # 0.1L/pulse -- multiply by 0.1 to convert pulse count to liters
+    total:
+      id: water_flow_total
+      name: "Water Flow Total"
+      unit_of_measurement: "L"
+      filters:
+        - multiply: 0.1 # 0.1L/pulse
+    on_value:
+      then:
+        - lambda: |-
+            if (!std::isnan(x)) {
+              ESP_LOGD("water_flow", "Flow rate: %.2f L/min, Total: %.1f L", x, id(water_flow_total).state);
+            }
+
+button:
+  - platform: restart
+    name: "Restart"
+    id: restart_btn
+    internal: true
+
+
+# =============================================================================
+# SPI BUS — SX1262 LoRa (Heltec V3/V4 internal traces, no external wiring)
+# =============================================================================
+spi:
+  clk_pin:  GPIO9
+  mosi_pin: GPIO10
+  miso_pin: GPIO11
+
+
+# =============================================================================
+# SX1262 LoRa Radio
+# =============================================================================
+sx126x:
+  id: lora_radio
+  hw_version: sx1262
+
+  # SPI & control pins — V3 and V4 share the same pinout
+  cs_pin:   GPIO8    # SPI chip select (NSS)
+  rst_pin:  GPIO12   # Hardware reset
+  busy_pin: GPIO13   # BUSY line — SX1262 holds HIGH during any internal
+                     # operation; the ESPHome driver polls before each SPI
+                     # transaction to avoid corrupting in-flight commands.
+  dio1_pin: GPIO14   # Interrupt output — signals TxDone / RxDone / Timeout.
+                     # IMPORTANT: Heltec's own docs and schematics sometimes
+                     # label this "DIO0". That is a documentation error.
+                     # The SX1262 chip has no DIO0; its first interrupt pin
+                     # is DIO1. GPIO14 is correctly wired to SX1262 pin DIO1.
+
+  # ---- RF switch: REQUIRED on Heltec V3/V4 ----------------------------------
+  # The board includes an RF antenna switch (PE4259 on V3, UPG2179 on some V4
+  # revisions) that routes the signal path to either the PA (TX) or LNA (RX).
+  # rf_switch: true instructs the SX1262 to drive DIO2 HIGH automatically
+  # when entering TX mode, toggling the switch to the PA path.
+  #
+  # Without this setting the switch remains in RX position during TX.
+  # Result: transmitted signal is attenuated ~20-30 dB. Effective range
+  # drops from the expected 1-5 km to only a few metres indoors.
+  rf_switch: true # doesn't seem to work by itself, still need to manually toggle the lora_pa_ctx pin for tx/rx switching
+
+  # ---- TCXO: REQUIRED on Heltec V3/V4 --------------------------------------
+  # The board uses a Temperature Compensated Crystal Oscillator (TCXO) as the
+  # SX1262 reference clock source, powered by DIO3 at 1.8V.
+  # Without this setting the chip attempts to use a passive crystal that is
+  # not populated on the board, resulting in failed initialisation or severe
+  # frequency instability (especially across the temperature range expected
+  # in outdoor cabin installations).
+  tcxo_voltage: 1_8V
+  tcxo_delay: 5ms   # Stabilisation time after TCXO power-on
+
+  modulation: LORA
+  frequency: 915000000   # 915 MHz — US ISM band (902-928 MHz)
+                          # Change to 868000000 for EU deployments
+
+  # SF9 chosen for this deployment:
+  #   Farthest cabin ≈ 530m with partial tree cover.
+  #   SF9 @ 125kHz BW gives a strong link budget with manageable air-time.
+  #   A 35-byte packet at SF9 occupies ≈ 215ms — well within ISM duty limits.
+  #   Step up to SF10 only if a specific cabin has consistently poor RSSI.
+  spreading_factor: 9
+  bandwidth:   125_0kHz
+  coding_rate: CR_4_5
+
+  # 14 dBm (~25mW) is ample for all cabins at these distances and keeps the
+  # PA cool for long-term reliability. Raise to 20 dBm only for the farthest
+  # cabin if signal margin is thin after physical deployment.
+  pa_power: 20
+
+  crc_enable: true           # Drop corrupted packets at the radio layer
+  sync_value: [0x14, 0x24]   # Private network — filters out LoRaWAN traffic
+  preamble_size: 12          # Longer than default (8) to aid receiver lock-on
+
+  rx_start: true
+
+  data_rate: 1MHz
+
+  on_packet:
+    then:
+      - lambda: |-
+          std::string pkt(x.begin(), x.end());
+          ESP_LOGI("lora_rx", "RX [%d bytes] RSSI=%.0f dBm SNR=%.1f dB: %s",
+                   (int)x.size(), rssi, snr, pkt.c_str());
+
+          LoraMsg msg = parse_lora_msg(pkt, rssi, snr);
+
+          if (!msg.valid){
+            ESP_LOGW("lora_rx", "Could not parse message: %s", pkt.c_str());
+            return;
+          }
+
+          if ( msg.command == "pong" ){
+            if ( msg.param(0) == id(dev_short_name) ){
+              float rem_rssi = msg.param_float(1);
+              float rem_snr = msg.param_float(2);
+
+              ESP_LOGI("ping_pong", "============================================");
+              ESP_LOGI("ping_pong", "  pong received");
+              ESP_LOGI("ping_pong", "  Remote Name: %s", msg.sender.c_str());
+              ESP_LOGI("ping_pong", "  Remote Time: %d", msg.sender_time);
+              ESP_LOGI("ping_pong", "  Remote RSSI: %.0f dBm", rem_rssi);
+              ESP_LOGI("ping_pong", "  Remote SNR : %.1f dB",  rem_snr);
+              ESP_LOGI("ping_pong", "  Local  RSSI: %.0f dBm", rssi);
+              ESP_LOGI("ping_pong", "  Local  SNR : %.1f dB",  snr);
+              ESP_LOGI("ping_pong", "============================================");
+              
+              //char buf[64];
+              //snprintf(buf, sizeof(buf), "pong|%.0f|%.1f|%.0f|%.1f @%lu", rem_rssi, rem_snr, rssi, snr, (unsigned long)(millis()/1000));
+              //id(set_status).execute(std::string(buf), 30000);
+
+                           
+              char l2buf[64];
+              snprintf(l2buf, sizeof(l2buf), "rem: %.0f|%.1f", rem_rssi, rem_snr);
+              char l3buf[64];
+              snprintf(l3buf, sizeof(l3buf), "lcl: %.0f|%.1f", rssi, snr);
+              
+              id(set_ml_status).execute(
+                "pong|" + msg.sender + "|" + std::to_string(msg.sender_time),
+                std::string(l2buf),
+                std::string(l3buf),
+                10000
+              );
+
+            } else {
+              ESP_LOGD("ping_pong", "received pong for node %s, not this node %s, ignoring", msg.param(0).c_str(), id(dev_short_name).c_str());
+            }
+          }
+
+
+# =============================================================================
+# Transmit interval — single packet per cycle, randomised jitter
+# =============================================================================
+# Fires every 60 seconds. Each tick draws a hardware random number to wait
+# 0–10000 ms before transmitting, then assembles and sends one
+# pipe-delimited ASCII packet. Re-randomizing every cycle means two nodes that
+# happen to be phase-aligned will almost certainly not collide again next cycle.
+# =============================================================================
+interval:
+  # transmit a status report every 60s.  Include a randomized delay of 0-10s to reduce the chance of airtime collisions.
+  - interval: 60s
+    startup_delay: 10s
+    then:
+      - lambda: |-
+          id(tx_delay_ms) = (uint32_t)(random_uint32() % 10000);  // Random delay between 0 and 9999 ms
+          ESP_LOGD("tx_interval", "Waiting for %d ms before transmitting", id(tx_delay_ms));
+
+      - script.execute:
+          id: set_status
+          msg: !lambda |-
+            return "wt " + std::to_string(id(tx_delay_ms)) + " @" + std::to_string((unsigned long)( millis()/1000UL ));
+          duration_ms: 30000
+
+      - delay: !lambda |-
+          return id(tx_delay_ms);
+
+      - script.execute: sensor_update_script
+      
+  # watchdog interval — restarts the node every 24h to recover from any unforeseen issues in the field.
+  - interval: 24h
+    startup_delay: 24h
+    then:
+      - logger.log:
+          level: INFO
+          format: "24h watchdog — restarting"
+      - delay: 2s
+      - button.press: restart_btn
+
+  # maintain the status message, clearing it if the clear_status_after timestamp has passed. This ensures that transient status messages (like "sent ping") don't linger indefinitely on the display.
+  - interval: 5s
+    then:
+      - lambda: |-
+          if (id(clear_status_after) > 0 && millis() > id(clear_status_after)) {
+            id(status_msg) = "";
+            id(clear_status_after) = 0;  
+          } 
+          if ( id(ml_status_clear_after) > 0 && millis() > id(ml_status_clear_after)) {
+            id(ml_status_line_1) = "";
+            id(ml_status_line_2) = "";
+            id(ml_status_line_3) = "";
+            id(ml_status_clear_after) = 0;
+          }
+          id(oled_display).update(); // refresh the display each cycle - we disabled the automatic updates to control timing manually to avoid competing timers
+
+# =============================================================================
+# Setup the PRG button to send a ping message with the current uptime when pressed.
+# =============================================================================
+binary_sensor:
+  - platform: gpio
+    id: prg_btn
+    pin:
+      number: 0
+      mode:
+        input: true
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+    on_press:
+      - script.execute:
+          id: ping
+                
+
+# =============================================================================
+# Custom Scripts
+# =============================================================================
+script:
+
+  # set a status message to auto clear after a specified duration.  If duration_ms is 0, the message will not clear automatically.
+  - id: set_status
+    mode: queued
+    parameters:
+      msg: string
+      duration_ms: int
+    then:
+      - lambda: |-
+          ESP_LOGD("set_status", "%s (ttl %d ms)", msg.c_str(), duration_ms);
+          id(status_msg) = msg;
+          id(clear_status_after) = millis() + duration_ms;
+          id(oled_display).update(); 
+
+  - id: set_ml_status
+    mode: queued
+    parameters: 
+      line1: string
+      line2: string
+      line3: string
+      duration_ms: int
+    then:
+      - lambda: |-
+          ESP_LOGD("set_ml_status", "Showing status for %dms", duration_ms);
+          ESP_LOGD("set_ml_status", "1: %s", line1.c_str());
+          ESP_LOGD("set_ml_status", "2: %s", line2.c_str());
+          ESP_LOGD("set_ml_status", "3: %s", line3.c_str());
+
+          id(ml_status_line_1) = line1;
+          id(ml_status_line_2) = line2;
+          id(ml_status_line_3) = line3;
+          id(ml_status_clear_after) = millis() + duration_ms;
+          id(oled_display).update();
+
+    
+
+  # transmit a lora message with the given string as payload.
+  - id: send_lora_msg
+    mode: queued
+    parameters:
+      msg: string
+    then:
+      - sx126x.set_mode_standby: # ensure the radio is in standby before toggling the PA for transmission
+      - delay: 10ms
+      - sx126x.set_mode_tx: # set the radio to TX mode, which should automatically set the RF switch to the PA path if rf_switch is working correctly
+      - output.turn_on: lora_pa_ctx
+      - delay: 10ms
+      - sx126x.send_packet:
+          data: !lambda |-
+            ESP_LOGD("lora_tx", "TX: %s", msg.c_str());
+            return std::vector<uint8_t>(msg.begin(), msg.end());
+      - delay: 50ms
+      - output.turn_off: lora_pa_ctx
+      - delay: 10ms
+      - sx126x.set_mode_rx: # return to RX mode after transmission to listen for
+
+  - id: ping
+    then:
+      - script.execute:
+          id: send_lora_msg
+          msg: !lambda |-
+            return "ping|" + id(dev_short_name) + "|" + std::to_string((unsigned long)( millis()/1000UL ));
+      - script.execute:
+          id: set_status
+          msg: !lambda |-
+            if ( id(ml_status_line_1).rfind("pong", 0) == 0 ){
+              id(ml_status_line_1) = "";
+              id(ml_status_line_2) = "";
+              id(ml_status_line_3) = "";
+              id(ml_status_clear_after) = 0;
+            }
+            return "ping @" + std::to_string((unsigned long)( millis()/1000UL ));
+          duration_ms: 5000
+  
+  - id: replay_config_logs
+    then:
+      - lambda: |-
+          id(replay_config_index) = 0; // reset index to start of logs
+          ESP_LOGI("log_config", "Starting replay of %d config log entries", (int)id(config_logs).size());
+      - while:
+          condition:
+            lambda: |-
+              return id(replay_config_index) < id(config_logs).size();
+          then:
+            - lambda: |-
+                ESP_LOGI("log_config", "[%03d] %s", id(replay_config_index), id(config_logs)[id(replay_config_index)].c_str());
+                id(replay_config_index) += 1;
+            - delay: 100ms
+      - lambda: |-
+          ESP_LOGI("log_config", "Completed replay of %d config logs", (int)id(config_logs).size());
+
+
+
+
+
+  - id: restart_script
+    then:
+      - lambda: |-
+          ESP_LOGI("restart_script", "Restarting node via script command");
+      - button.press: restart_btn
+
+
+
+
+
+
+  - id: sensor_update_script
+    then:
+      - lambda: |-
+          id(tx_in_progress) = true;
+
+      - script.execute:
+          id: set_status
+          msg: !lambda |-
+            return "prep tx @" + std::to_string((unsigned long)( millis()/1000UL ));
+          duration_ms: 30000
+
+      # read the mcu and external temperatures right before posting, so we have the latest instantaneous values. 
+      - component.update: mcu_temperature
+      - delay: 1s
+
+      - component.update: temperature
+      - delay: 1s
+
+      - script.execute:
+          id: send_lora_msg
+          msg: !lambda |-
+            // calculate the average current values over the reporting period, then reset the variables for the next cycle
+            float avg_a = id(current_a_count) > 0 ? id(current_a_sum) / id(current_a_count) : 0.0f;
+            float avg_b = id(current_b_count) > 0 ? id(current_b_sum) / id(current_b_count) : 0.0f;
+
+            id(current_a_sum) = 0.0f;
+            id(current_b_sum) = 0.0f;
+            id(current_a_count) = 0;
+            id(current_b_count) = 0;
+
+            char buf[256];
+            snprintf(buf, sizeof(buf), "s|%s|%lu|%.1f|%.1f|%.1f|%.1f|%.1f", 
+              id(dev_short_name).c_str(), 
+              (unsigned long)( millis()/1000UL ), 
+              id(mcu_temperature).state, 
+              id(temperature).state, 
+              avg_a, 
+              avg_b,
+              id(water_flow_total).state); // placeholder for water flow sensor value
+
+            id(last_lora_msg) = std::string(buf);
+            return id(last_lora_msg);
+
+      - script.execute:
+          id: set_status
+          msg: !lambda |-
+            return "tx " + std::to_string((unsigned long)id(last_lora_msg).length()) + "b @" + std::to_string((unsigned long)( millis()/1000UL ));
+          duration_ms: 30000
+
+      - lambda: |-
+          id(tx_in_progress) = false;
+
+      - ble_server.characteristic.set_value:
+          id: ble_state_char
+          value: 
+            data: !lambda |-
+              return std::vector<uint8_t>(id(last_lora_msg).begin(), id(last_lora_msg).end());
+      - ble_server.characteristic.notify:
+          id: ble_state_char
