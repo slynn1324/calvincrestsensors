@@ -84,6 +84,7 @@ esphome:
   name_add_mac_suffix: true 
   includes: 
     - custom_utils.h
+    - sx126x_cad.h
   on_boot:
     - priority: 650
       then:
@@ -639,11 +640,65 @@ script:
     parameters:
       msg: string
     then:
-      - sx126x.set_mode_standby: # ensure the radio is in standby before toggling the PA for transmission
-      - delay: 10ms
-      - sx126x.set_mode_tx: # set the radio to TX mode, which should automatically set the RF switch to the PA path if rf_switch is working correctly
+      - output.turn_off: lora_pa_ctx
+      # - sx126x.set_mode_rx: lora_radio # ensure the radio is in standby before toggling the PA for transmission
+      # - delay: 100ms
+      - wait_until:
+          condition:
+            lambda: |-
+              return clear_air_check(id(lora_radio));
+          timeout: 1s
+      # - wait_until:
+      #     condition: 
+      #       lambda: |-
+
+      #         # auto *radio = static_cast<esphome::sx126x_cad::SX126xCad *>(id(lora_radio));
+
+      #         # for ( int i = 0; i < 5; ++i ){
+      #         #   float rssi = radio->get_instant_rssi();
+
+      #         #   ESP_LOGD("cca", "RSSI Check %d: %.1f dBm", i, rssi);
+
+      #         #   if ( rssi < -105.0f ){
+      #         #     ESP_LOGD("cc", "Channel clear");
+      #         #     return true;
+      #         #   }
+
+      #         #   vTaskDelay(pdMS_TO_TICKS(20));
+      #         # }
+
+      #         # ESP_LOGW("cca", "Channel busy (RSSI high), but forced to send.");
+      #         # return true;
+              
+      #         //for ( int i = 0; i < 3; ++i ){
+      #         //  float rssi = id(lora_radio).rssi();
+      #         //  ESP_LOGD("cca", "check %d channel rssi: %.0f dBm (threshold of %.0f dBm)", i, rssi, -90.0f);
+      #         //  bool clear = rssi < -90.0f;
+      #         //  if ( clear ){
+      #         //    return true;
+      #         //  } else {
+      #         //    vTaskDelay(pdMS_TO_TICKS(5));
+      #         //  }
+      #         // }
+      #         //ESP_LOGW("cca", "channel busy, sending anyway");
+      #         //return true;
+
+      #         // // Cast the base SX126x instance to our extended class to access perform_cad()
+      #         // auto *radio = static_cast<esphome::sx126x_cad::SX126xCad *>(id(lora_radio));
+      #         // radio->set_cad_params(2, 31, 10, 0x00, 0); // only needs to be called once really, could move to on_boot
+      #         // bool busy = radio->perform_cad();
+      #         // if (busy) {
+      #         //   ESP_LOGW("send_lora_msg", "CAD: channel busy, aborting TX of: %s", msg.c_str());
+      #         //   // id(cca_passed) = false;
+      #         //   return false;
+      #         // } else {
+      #         //   ESP_LOGD("send_lora_msg", "CAD: channel clear, proceeding with TX");
+      #         //   // id(cca_passed) = true;
+      #         //   return true;
+      #         // }
       - output.turn_on: lora_pa_ctx
-      - delay: 10ms
+      - delay: 5ms
+      - sx126x.set_mode_tx: lora_radio # set the radio to TX mode, which should automatically set the RF switch to the PA path if rf_switch is working correctly
       - sx126x.send_packet:
           data: !lambda |-
             ESP_LOGD("lora_tx", "TX: %s", msg.c_str());
@@ -651,7 +706,7 @@ script:
       - delay: 50ms
       - output.turn_off: lora_pa_ctx
       - delay: 10ms
-      - sx126x.set_mode_rx: # return to RX mode after transmission to listen for
+      - sx126x.set_mode_rx: lora_radio # return to RX mode after transmission to listen for
 
   - id: ping
     then:
