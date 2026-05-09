@@ -78,13 +78,17 @@ globals:
     restore_value: no
     initial_value: '0'
 
+external_components:
+  - source:
+      type: local
+      path: components
 
 esphome:
   name: ccsnode
   name_add_mac_suffix: true 
   includes: 
     - custom_utils.h
-    - sx126x_cad.h
+    # - sx126x_cad.h
   on_boot:
     - priority: 650
       then:
@@ -104,8 +108,7 @@ esphome:
         - delay: 100ms                # Stabilization time before I2C init
         - lambda: |-
             ESP_LOGD("on_boot", "vext_ctrl, lora_pa_power, and lora_pa_csd should be on. Continuing with boot sequence...");
-       
-  
+
 esp32:
   board: esp32-s3-devkitc-1
   framework:
@@ -239,12 +242,12 @@ output:
       mode:
         output: true
 
-  - platform: gpio
-    id: lora_pa_ctx # LORA_PA_CTX - set high for transmit and low for listen
-    pin:
-      number: 5
-      mode:
-        output: true
+  # - platform: gpio
+  #   id: lora_pa_ctx # LORA_PA_CTX - set high for transmit and low for listen
+  #   pin:
+  #     number: 5
+  #     mode:
+  #       output: true
 
 i2c:
   - id: display_i2c_bus
@@ -407,7 +410,7 @@ spi:
 # =============================================================================
 # SX1262 LoRa Radio
 # =============================================================================
-sx126x:
+sx126x_cad:
   id: lora_radio
   hw_version: sx1262
 
@@ -422,6 +425,9 @@ sx126x:
                      # label this "DIO0". That is a documentation error.
                      # The SX1262 chip has no DIO0; its first interrupt pin
                      # is DIO1. GPIO14 is correctly wired to SX1262 pin DIO1.
+
+  pa_ctx_pin: GPIO5  # The Heltec v4.3 has an externally controlled PA_CTX switch that needs to be HIGH for TX, LOW for RX
+  cad_timeout: 10s   # enable channel activity detection
 
   # ---- RF switch: REQUIRED on Heltec V3/V4 ----------------------------------
   # The board includes an RF antenna switch (PE4259 on V3, UPG2179 on some V4
@@ -640,14 +646,23 @@ script:
     parameters:
       msg: string
     then:
-      - output.turn_off: lora_pa_ctx
+      # - output.turn_off: lora_pa_ctx
       # - sx126x.set_mode_rx: lora_radio # ensure the radio is in standby before toggling the PA for transmission
       # - delay: 100ms
-      - wait_until:
-          condition:
-            lambda: |-
-              return clear_air_check(id(lora_radio));
-          timeout: 1s
+      # - lambda: |-
+      #     id(lora_radio).start_channel_scan();
+      # - delay: 20ms
+      # - wait_until:
+      #     condition:
+      #       lambda: |-
+      #         if ( id(lora_radio).is_cad_clear() ){
+      #           ESP_LOGD("lora_tx", "Channel clear, sending");
+      #           return true;
+      #         } else {
+      #           ESP_LOGW("lora_tx", "Channel busy, retrying...");
+      #           return false;
+      #         }              
+      #     timeout: 1s
       # - wait_until:
       #     condition: 
       #       lambda: |-
@@ -696,17 +711,25 @@ script:
       #         //   // id(cca_passed) = true;
       #         //   return true;
       #         // }
-      - output.turn_on: lora_pa_ctx
-      - delay: 5ms
-      - sx126x.set_mode_tx: lora_radio # set the radio to TX mode, which should automatically set the RF switch to the PA path if rf_switch is working correctly
-      - sx126x.send_packet:
+      # - output.turn_on: lora_pa_ctx
+      # - delay: 5ms
+      # - sx126x.set_mode_tx: lora_radio # set the radio to TX mode, which should automatically set the RF switch to the PA path if rf_switch is working correctly
+      #- sx126x.send_packet:
+      #    data: !lambda |-
+      #      ESP_LOGD("lora_tx", "TX: %s", msg.c_str());
+      #      return std::vector<uint8_t>(msg.begin(), msg.end());
+      #- lambda: |-
+      #    ESP_LOGD("lora_tx", "TX: %s", msg.c_str());
+      #    id(lora_radio).async_transmit_packet(std::vector<uint8_t>(msg.begin(), msg.end()));
+      - sx126x.async_send_packet:
           data: !lambda |-
             ESP_LOGD("lora_tx", "TX: %s", msg.c_str());
             return std::vector<uint8_t>(msg.begin(), msg.end());
-      - delay: 50ms
-      - output.turn_off: lora_pa_ctx
-      - delay: 10ms
-      - sx126x.set_mode_rx: lora_radio # return to RX mode after transmission to listen for
+          # cad_timeout: 0s
+      # - delay: 50ms
+      # - output.turn_off: lora_pa_ctx
+      # - delay: 10ms
+      # - sx126x.set_mode_rx: lora_radio # return to RX mode after transmission to listen for
 
   - id: ping
     then:

@@ -9,6 +9,10 @@ globals:
     restore_value: no
     initial_value: '0'
 
+external_components:
+  - source:
+      type: local
+      path: components
 
 esphome:
   name: bridge
@@ -82,12 +86,12 @@ output:
       mode:
         output: true
 
-  - platform: gpio
-    id: lora_pa_ctx # LORA_PA_CTX - set high for transmit and low for listen.
-    pin:
-      number: 5
-      mode:
-        output: true
+  # - platform: gpio
+  #   id: lora_pa_ctx # LORA_PA_CTX - set high for transmit and low for listen.
+  #   pin:
+  #     number: 5
+  #     mode:
+  #       output: true
 
 i2c:
   - id: display_i2c_bus
@@ -161,7 +165,7 @@ spi:
 # =============================================================================
 # SX1262 LoRa Radio
 # =============================================================================
-sx126x:
+sx126x_cad:
   id: lora_radio
   hw_version: sx1262
 
@@ -176,6 +180,9 @@ sx126x:
                      # label this "DIO0". That is a documentation error.
                      # The SX1262 chip has no DIO0; its first interrupt pin
                      # is DIO1. GPIO14 is correctly wired to SX1262 pin DIO1.
+  
+  pa_ctx_pin: GPIO5  # The Heltec v4.3 has an externally controlled PA_CTX switch that needs to be HIGH for TX, LOW for RX
+  cad_timeout: 10s   # enable channel activity detection
 
   # ---- RF switch: REQUIRED on Heltec V3/V4 ----------------------------------
   # The board includes an RF antenna switch (PE4259 on V3, UPG2179 on some V4
@@ -271,6 +278,12 @@ interval:
       - delay: 2s
       - button.press: restart_btn
 
+  # don't leave this running, it gets HOT.  Way too fast of a duty cycle on transmit for continuous use.
+  # - interval: 100ms
+  #   then:
+  #     - script.execute:
+  #         id: lora_flood
+
 
 
 
@@ -285,21 +298,22 @@ script:
     parameters:
       msg: string
     then:
-      - sx126x.set_mode_standby: # ensure the radio is in standby before toggling the PA for transmission
-      - delay: 10ms
-      - sx126x.set_mode_tx: # set the radio to TX mode, which should automatically set the RF switch to the PA path if rf_switch is working correctly
-      - output.turn_on: lora_pa_ctx
-      - delay: 10ms
-      - sx126x.send_packet:
+      # - sx126x.set_mode_standby: # ensure the radio is in standby before toggling the PA for transmission
+      # - delay: 10ms
+      # - sx126x.set_mode_tx: # set the radio to TX mode, which should automatically set the RF switch to the PA path if rf_switch is working correctly
+      # - output.turn_on: lora_pa_ctx
+      # - delay: 10ms
+      - sx126x.async_send_packet:
           data: !lambda |-
             ESP_LOGD("lora_tx", "TX: %s", msg.c_str());
             return std::vector<uint8_t>(msg.begin(), msg.end());
-      - delay: 50ms
-      - output.turn_off: lora_pa_ctx
-      - delay: 10ms
-      - sx126x.set_mode_rx: # return to RX mode after transmission to listen for
+      # - delay: 50ms
+      # - output.turn_off: lora_pa_ctx
+      # - delay: 10ms
+      # - sx126x.set_mode_rx: # return to RX mode after transmission to listen for
 
   - id: send_pong
+    mode: queued
     parameters:
       target: string
       rssi: float
@@ -319,3 +333,12 @@ script:
           );
           std::string pong_msg = std::string(buf);
           id(send_lora_msg).execute(pong_msg);
+  
+  # - id: lora_flood
+  #   mode: single
+  #   then:
+  #     - script.execute: 
+  #         id: send_lora_msg
+  #         msg: "flood the airwaves for testing"
+  #     - lambda: |-
+  #         ESP_LOGD("lora_flood", "sent flood message");
