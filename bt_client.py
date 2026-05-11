@@ -31,6 +31,8 @@ import select
 import sys
 import termios
 import tty
+import os
+import shutil
 from datetime import datetime
 from bleak import BleakClient, BleakScanner
 from bleak.backends.characteristic import BleakGATTCharacteristic
@@ -52,6 +54,7 @@ SHORTCUTS: dict[str, tuple[str | None, str]] = {
     "r": ("restart",        "Soft-Restart the device"),
     "?": (None,             "Show keyboard shortcuts"),
     "q": (None,             "Disconnect and quit"),
+    "f": (None,             "OTA Firmware Upgrade")
 }
 
 # ── ANSI colours ──────────────────────────────────────────────────────────────
@@ -68,16 +71,20 @@ PURPLE = "\033[35m"
 last_water_total: float = 0.0
 last_water_time: float = 0.0
 
+progress_msg = ""
+
 def ts() -> str:
     return datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
 
 def rprint(*args, **kwargs) -> None:
+    clear_progress()
     """Print with \\r\\n line endings so output is correct in raw terminal mode."""
     buf = io.StringIO()
     print(*args, file=buf, **kwargs)
     sys.stdout.write(buf.getvalue().replace("\n", "\r\n"))
     sys.stdout.flush()
+    write_progress(progress_msg)
 
 
 def print_shortcuts() -> None:
@@ -248,7 +255,7 @@ async def read_key() -> str | None:
         return sys.stdin.read(1)
     return None
 
-async def keyboard_loop(client: BleakClient, stop_event: asyncio.Event) -> None:
+async def keyboard_loop(client: BleakClient, stop_event: asyncio.Event, raw_term: RawTerminal) -> None:
     print_shortcuts()
     while not stop_event.is_set() and client.is_connected:
         key = await read_key()
@@ -261,6 +268,22 @@ async def keyboard_loop(client: BleakClient, stop_event: asyncio.Event) -> None:
 
             if key == "?":
                 print_shortcuts()
+
+            elif key == "f":
+                # Step out of raw mode for normal input()
+                raw_term.__exit__(None, None, None)
+                clear_progress()
+
+                sys.stdout.write(f"\n{CYAN}Enter firmware .bin path: {RESET}")
+                sys.stdout.flush()
+                path = input().strip()
+                raw_term.__enter__()
+
+                if path and os.path.exists(path):
+                    rprint(f"{PURPLE}[OTA] Starting upload: {path}{RESET}")
+                    asyncio.ensure_future(ota_upload(client, path, stop_event))
+                else:
+                    rprint(f"{RED}[OTA] File not found: {path}{RESET}")
 
             elif key in SHORTCUTS:
                 payload, desc = SHORTCUTS[key]
@@ -282,6 +305,28 @@ def make_disconnected_callback(stop_event: asyncio.Event):
         # loop = asyncio.get_running_loop()
         # loop.stop()
     return callback
+
+def write_progress(msg: str) -> None:
+    global progress_msg
+    progress_msg = msg
+    rows, cols = shutil.get_terminal_size()
+    # Clear the line first to avoid leftover chars if msg shrinks
+    padded = msg.ljust(cols - 1)
+    # \0337 = save cursor, \033[{row};0H = move to bottom row, \0338 = restore cursor
+    sys.stdout.write(f"\0337\033[{rows};0H\033[2K{PURPLE}{padded}{RESET}\0338")
+    sys.stdout.flush()
+
+def clear_progress() -> None:
+    rows, cols = shutil.get_terminal_size()
+    sys.stdout.write(f"\0337\033[{rows};0H\033[2K\0338")
+    sys.stdout.flush()
+
+async def ota_upload(client, path, stop_event):
+    for i in range(1,100):
+        clear_progress()
+        write_progress(f"message {i} lorem ipsum doler sit amet lorem ipsum doler sit amet lorem ipsum doler sit amet lorem ipsum doler sit amet")
+        await asyncio.sleep(1.0)
+
 
 # ── Main connection logic ──────────────────────────────────────────────────────────
 
@@ -316,8 +361,8 @@ async def run(address: str) -> None:
 
         
         
-        with RawTerminal():
-            await keyboard_loop(client, stop_event)
+        with RawTerminal() as raw_term:
+            await keyboard_loop(client, stop_event, raw_term)
         
 
         if not stop_event.is_set():
@@ -326,6 +371,7 @@ async def run(address: str) -> None:
             await client.stop_notify(LOG_CHAR_UUID)
             await client.stop_notify(STATE_CHAR_UUID)
 
+    clear_progress()
     print(f"{GREEN}Disconnected.{RESET}")
     sys.exit(0)
 
