@@ -36,10 +36,10 @@ from bleak import BleakClient, BleakScanner
 from bleak.backends.characteristic import BleakGATTCharacteristic
 
 # ── UUIDs ─────────────────────────────────────────────────────────────────────
-SERVICE_UUID    = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-LOG_CHAR_UUID   = "a1b2c3d4-e5f6-7890-abcd-ef1234567891"
-STATE_CHAR_UUID = "a1b2c3d4-e5f6-7890-abcd-ef1234567892"
-CMD_CHAR_UUID   = "a1b2c3d4-e5f6-7890-abcd-ef1234567893"
+SERVICE_UUID    = "43434353-0001-1000-8000-00805F9B34FB"
+LOG_CHAR_UUID   = "43434353-0002-1000-8000-00805F9B34FB"
+STATE_CHAR_UUID = "43434353-0003-1000-8000-00805F9B34FB"
+CMD_CHAR_UUID   = "43434353-0004-1000-8000-00805F9B34FB"
 
 # ── Keyboard shortcuts → (cmd_payload, description) ───────────────────────────
 # payload=None  → handled specially in keyboard_loop
@@ -115,8 +115,21 @@ def log_notification(characteristic: BleakGATTCharacteristic, data: bytearray) -
     try:
         msg = data.decode("utf-8", errors="replace").strip()
         # regex match for format [I][log_config:593]:
-        if re.match(r"^\[I\]\[log_config:\d+\]: \[\d+\] ", msg):
-            rprint(f"{GREY}[{ts()}]{RESET} {PURPLE}{msg}{RESET}")
+        if msg.startswith("[C]"):
+
+            prefix_end = msg.find("]: ")
+            
+            if prefix_end != -1:
+                prefix = msg[:prefix_end + 3]
+                rest = msg[prefix_end + 3:]
+                lines = rest.split("\n")
+                for line in lines:
+                    if line.strip():
+                        rprint(f"{GREY}[{ts()}]{RESET} {PURPLE}{prefix}{line}{RESET}")
+
+            else:
+               rprint(f"{GREY}[{ts()}]{RESET} {PURPLE}{msg}{RESET}")
+
         elif msg.startswith("[I]"):
             rprint(f"{GREY}[{ts()}]{RESET} {GREEN}{msg}{RESET}")
         elif msg.startswith("[D]"):
