@@ -639,9 +639,12 @@ class BLELoggerClient:
 
     async def _run_ota_upload(self, path: str, password: str) -> None:
         try:
+            self._term.set_status("  OTA Upload Starting...")
+
             with open(path, "rb") as f:
                 firmware = f.read()
 
+            self._term.set_status("  OTA Upload -- Verifying firmware...")
             uploader = esp32_ble_ota_upload.ESP32BLEOTAUploader(
                 firmware=firmware, password=password
             )
