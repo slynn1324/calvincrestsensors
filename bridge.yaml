@@ -13,9 +13,11 @@ external_components:
   - source:
       type: local
       path: components
+  - source: github://slynn1324/esp32_ble_ota
+    components: [esp32_ble_ota] 
 
 esphome:
-  name: bridge
+  name: ccsnode-bridge
   name_add_mac_suffix: false
   includes: 
     - custom_utils.h
@@ -24,15 +26,13 @@ esphome:
       then:
         - lambda: |-
             // keep only the mac address part for a short name
-            std::string full_name = "bridge"; App.get_name();
-            // if(full_name.length() >= 6 ){
-            //  id(dev_short_name) = full_name.substr(full_name.length() - 6);
-            // } else {
-            //  id(dev_short_name) = full_name;
-            // }
-            // for the bridge, just use the node name - it's just bridge
-            id(dev_short_name) = full_name;
-
+            std::string full_name = App.get_name();
+            if(full_name.length() >= 6 ){
+              id(dev_short_name) = full_name.substr(full_name.length() - 6);
+            } else {
+              id(dev_short_name) = full_name;
+            }
+            
             ESP_LOGD("on_boot", "Powering on Vext rail...");
         - output.turn_on: vext_ctrl   # GPIO36 LOW → PFET on → Vext rail live
         - output.turn_on: lora_pa_power # Set LORA_PA_POWER HIGH to enable
@@ -47,6 +47,84 @@ esp32:
     type: esp-idf
 
 logger:
+  level: DEBUG
+  on_message:
+    level: DEBUG
+    then:
+      - ble_server.characteristic.set_value:
+          id: ble_log_char
+          value: 
+            data: !lambda |-
+              std::string msg = message;
+              return std::vector<uint8_t>(msg.length() < 7 ? msg.begin() : msg.begin()+7, msg.length() < 7 ? msg.end() : msg.end()-4);
+      - ble_server.characteristic.notify:
+          id: ble_log_char
+
+esp32_ble_server:
+  services:
+    - uuid: "43434353-0001-1000-8000-00805F9B34FB"
+      characteristics:
+        - uuid: "43434353-0002-1000-8000-00805F9B34FB"
+          id: ble_log_char
+          read: true
+          notify: true
+          description: log
+          value:
+            data: ""
+            type: string
+        - uuid: "43434353-0003-1000-8000-00805F9B34FB"
+          id: ble_state_char
+          read: true
+          notify: true
+          description: state
+          value:
+            data: ""
+            type: string
+        - uuid: "43434353-0004-1000-8000-00805F9B34FB"
+          id: ble_cmd_char
+          read: false
+          write: true
+          description: cmd
+          value:
+            data: ""
+            type: string
+          on_write:
+            then:
+              - lambda: |-
+                  ESP_LOGD("ble_cmd_char", "Write received on cmd characteristic, length: %d", (int)x.size());
+                  // read the std::vector<uint8_t> from 'x' and convert it to a string
+                  if (x.size() > 0) {
+                    std::string cmd(x.begin(), x.end());
+                    ESP_LOGD("ble_cmd_char", "Received BLE command: %s", cmd.c_str());
+                    
+                    if (cmd == "log_config") {
+                      
+                      ESP_LOGI("ble_cmd_char", "Received log_config command, replaying config logs");
+                      id(replay_config_logs).execute();
+                    
+                    } else if ( cmd == "ping" ){
+                    
+                      ESP_LOGI("ble_cmd_char", "Received ping command over BLE, running ping script...");
+                      id(ping).execute();
+
+                    } else if ( cmd == "update_sensors" ){
+
+                      ESP_LOGI("ble_cmd_char", "Received update_sensors command over BLE, running sensor_update_script...");
+                      id(sensor_update_script).execute();
+                    
+                    } else if ( cmd == "restart" ){
+                    
+                      ESP_LOGI("ble_cmd_char", "Received restart command over BLE, running restart script...");
+                      id(restart_script).execute();
+
+                    } else {
+                      ESP_LOGW("ble_cmd_char", "Unknown command received: %s", cmd.c_str());
+                    }
+                  }
+
+ota:
+  - platform: esp32_ble_ota
+    password: slynn
 
 wifi:
   ssid: !secret wifi_ssid
@@ -60,9 +138,13 @@ mqtt:
   broker: !secret mqtt_host
   username: !secret mqtt_username
   password: !secret mqtt_password
-  topic_prefix: "cclora/bridge"
+  topic_prefix: "ccs/bridge"
 
+# -------------------------------------------------------------------------
+# GPIO Pin Control
+# -------------------------------------------------------------------------
 output:
+  # vext controls the power to the display and the lora radio
   - platform: gpio
     id: vext_ctrl
     pin:
@@ -72,6 +154,7 @@ output:
       inverted: true 
 
   # radio control pins: https://github.com/HelTecAutomation/Heltec_ESP32/blob/master/src/radio/radio.c
+  # these pins need to be enabled to power the radio and amplifiers, hold high for radio operation
   - platform: gpio
     id: lora_pa_csd # PA_CSD - set high to transmit or listen
     pin: 
@@ -86,13 +169,9 @@ output:
       mode:
         output: true
 
-  # - platform: gpio
-  #   id: lora_pa_ctx # LORA_PA_CTX - set high for transmit and low for listen.
-  #   pin:
-  #     number: 5
-  #     mode:
-  #       output: true
-
+# -------------------------------------------------------------------------
+# Display Configuration
+# -------------------------------------------------------------------------
 i2c:
   - id: display_i2c_bus
     sda: 17
@@ -127,12 +206,24 @@ font:
     id: mono_12
     size: 12
 
+# -------------------------------------------------------------------------
+# Sensors
+# -------------------------------------------------------------------------
 sensor:
   - platform: uptime
     name: "uptime"
     id: "dev_uptime"
     update_interval: 1s
     internal: true
+
+  - platform: internal_temperature
+    name: "MCU Temperature"
+    id: "mcu_temperature"
+    update_interval: 60s
+    on_value:
+      then:
+        - lambda: |-
+            ESP_LOGD("mcu_temp", "MCU Temperature: %.1f C", x);
 
 button:
   - platform: restart
@@ -214,8 +305,17 @@ sx126x_cad:
   #   SF9 @ 125kHz BW gives a strong link budget with manageable air-time.
   #   A 35-byte packet at SF9 occupies ≈ 215ms — well within ISM duty limits.
   #   Step up to SF10 only if a specific cabin has consistently poor RSSI.
+  # LORA / Meshtastic References
+  # Preset      | Bandwidth (kHz)   | SF  | Data Rate (kbps)  | Link Budget | Best For
+  # ----------------------------------------------------------------------------------
+  # LongFast    | 250               | 11  | 1.07              | 153dB       | Default
+  # MediumSlow  | 250               | 10  | 1.95              | 150.5dB     | Better Speed
+  # MediumFast  | 250               | 9   | 3.52              | 148dB       | Fast with good range
+  # ShortSlow   | 250               | 8   | 6.25              | 145.5dB     | Fast with moderate range
+  # ShortFast   | 250               | 7   | 10.94             | 143dB       | Very fast, shorter range
+  # ShortTurbo  | 500               | 7   | 21.88             | 140dB       | Maximum speed, minimum range
   spreading_factor: 9
-  bandwidth:   125_0kHz
+  bandwidth:   250_0kHz
   coding_rate: CR_4_5
 
   # 14 dBm (~25mW) is ample for all cabins at these distances and keeps the
@@ -234,6 +334,7 @@ sx126x_cad:
   on_packet:
     then:
       - lambda: |-
+          // handle receiving a LORA packet
 
           std::string pkt(x.begin(), x.end());
           ESP_LOGI("lora_rx", "RX [%d bytes] RSSI=%.0f dBm SNR=%.1f dB: %s",
@@ -334,11 +435,23 @@ script:
           std::string pong_msg = std::string(buf);
           id(send_lora_msg).execute(pong_msg);
   
-  # - id: lora_flood
-  #   mode: single
-  #   then:
-  #     - script.execute: 
-  #         id: send_lora_msg
-  #         msg: "flood the airwaves for testing"
-  #     - lambda: |-
-  #         ESP_LOGD("lora_flood", "sent flood message");
+  - id: ping
+    then:
+      - lambda: |-
+          ESP_LOGW("ping", "PING NOT IMPLEMENTED ON BRIDGE");
+
+  - id: sensor_update_script
+    then:
+      - lambda: |-
+          ESP_LOGW("sensor_update_script", "SENSOR UPDATE NOT IMPLEMENTED ON BRIDGE");
+  
+  - id: replay_config_logs
+    then:
+      - lambda: |-
+          App.schedule_dump_config();
+
+  - id: restart_script
+    then:
+      - lambda: |-
+          ESP_LOGI("restart_script", "Restarting node via script command");
+      - button.press: restart_btn

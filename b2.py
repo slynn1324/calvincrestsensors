@@ -427,7 +427,7 @@ class BLELoggerClient:
             print(f"{GREEN}Connected to {self.address}{RESET}")
 
             if not self._verify_service():
-                print(f"{RED}ESPHome service not found on device. Wrong device?{RESET}")
+                print(f"{RED}CCSNode service not found on device. Wrong device?{RESET}")
                 return True
 
             print(f"{YELLOW}Subscribing to log characteristic...{RESET}")
@@ -666,7 +666,7 @@ async def find_device(name_suffix: str = None, address: str = None) -> str:
     if address:
         return address
 
-    print(f"{YELLOW}Scanning for ESPHome nodes...{RESET}")
+    print(f"{YELLOW}Scanning for CCSNode nodes...{RESET}")
     devices = await BleakScanner.discover(timeout=2.0)
     devices = _filter_devices(devices, name_suffix)
 
@@ -676,7 +676,7 @@ async def find_device(name_suffix: str = None, address: str = None) -> str:
         devices = _filter_devices(devices, name_suffix)
 
     if not devices:
-        print(f"{RED}No ESPHome nodes found.{RESET}")
+        print(f"{RED}No CCSNode nodes found.{RESET}")
         sys.exit(1)
 
     if len(devices) == 1:
@@ -736,7 +736,7 @@ async def run(args) -> None:
 
 
 async def main() -> None:
-    parser = argparse.ArgumentParser(description="ESPHome BLE Logger")
+    parser = argparse.ArgumentParser(description="CCSNode BLE Client")
     parser.add_argument("--name",    "-n", help="Device name suffix to match", default=None)
     parser.add_argument("--address", "-a", help="BLE MAC address to connect to", default=None)
     args = parser.parse_args()

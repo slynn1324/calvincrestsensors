@@ -428,8 +428,17 @@ sx126x_cad:
   #   SF9 @ 125kHz BW gives a strong link budget with manageable air-time.
   #   A 35-byte packet at SF9 occupies ≈ 215ms — well within ISM duty limits.
   #   Step up to SF10 only if a specific cabin has consistently poor RSSI.
+  # LORA / Meshtastic References
+  # Preset      | Bandwidth (kHz)   | SF  | Data Rate (kbps)  | Link Budget | Best For
+  # ----------------------------------------------------------------------------------
+  # LongFast    | 250               | 11  | 1.07              | 153dB       | Default
+  # MediumSlow  | 250               | 10  | 1.95              | 150.5dB     | Better Speed
+  # MediumFast  | 250               | 9   | 3.52              | 148dB       | Fast with good range
+  # ShortSlow   | 250               | 8   | 6.25              | 145.5dB     | Fast with moderate range
+  # ShortFast   | 250               | 7   | 10.94             | 143dB       | Very fast, shorter range
+  # ShortTurbo  | 500               | 7   | 21.88             | 140dB       | Maximum speed, minimum range
   spreading_factor: 9
-  bandwidth:   125_0kHz
+  bandwidth:   250_0kHz
   coding_rate: CR_4_5
 
   # 14 dBm (~25mW) is ample for all cabins at these distances and keeps the
