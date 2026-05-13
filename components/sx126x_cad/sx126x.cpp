@@ -400,10 +400,10 @@ SX126xError SX126x::async_transmit_packet(const std::vector<uint8_t> &packet, op
 // will first invoke channel activity detection if configured, maintain and check per-packet timeout values
 // and then transmit the packet if the air is clear or the cad_timeout has been exceeded
 void SX126x::maybe_transmit_queued_packet() {
-  ESP_LOGD(TAG, "maybe_transmit_queued_packet queue size=%d", this->async_tx_queue_.size());
   if ( this->async_tx_queue_.empty() ){
     return;
   }
+  ESP_LOGD(TAG, "TX packet - queue_size=%d", this->async_tx_queue_.size());
 
   AsyncPacket &ap = this->async_tx_queue_.front(); // peek at the front item in the queue to send it
   
@@ -423,20 +423,20 @@ void SX126x::maybe_transmit_queued_packet() {
     // perform channel activity detection and record result
     uint32_t start = millis();
     cad = this->scan_channel_clear();
-    ESP_LOGD(TAG, "scan_channel_clear took: %lu ms, result=%s", millis()-start, cad ? "clear" : "busy");
+    ESP_LOGD(TAG, "TX CAD duration=%lu ms, result=%s", millis()-start, cad ? "clear" : "busy");
   }
 
 
   if ( cad ) {   // cad == true means that the channel is clear
     
-    ESP_LOGD(TAG, "transmitting queued packet size=%d", ap.packet.size());
+    ESP_LOGV(TAG, "transmitting queued packet size=%d", ap.packet.size());
 
     SX126xError result = this->transmit_packet(ap.packet);
 
     if ( result == SX126xError::NONE ){ // we already validated the size before enqueue, so only a tx timeout can fail here - which may be hardware error
-      ESP_LOGD(TAG, "transmitted packet");
+      ESP_LOGD(TAG, "TX packet size=%d", ap.packet.size());
     } else {
-      ESP_LOGW(TAG, "error transmitting packet, packet dropped.");
+      ESP_LOGW(TAG, "TX ERROR TRANSMITTING PACKET, PACKET DROPPED size=%s", ap.packet.size());
     }
 
     // the only error types are essentially fatal for the packet, so pop it from the queue no matter what so we don't get stuck on a poison packet
@@ -444,12 +444,12 @@ void SX126x::maybe_transmit_queued_packet() {
 
     // if there are still items in the queue, try to send the next 100ms later.
     if ( !this->async_tx_queue_.empty() ){
-      ESP_LOGD(TAG, "more packets in queue, setting timeout to send the next in 100ms");
+      ESP_LOGD(TAG, "TX more packets in queue, setting timeout to send the next in 100ms");
       this->set_timeout("maybe_transmit_queued_packet", 100, [this](){ this->maybe_transmit_queued_packet(); });
     }
 
   } else { // cad == false -- the channel is busy
-    ESP_LOGD(TAG, "maybe_transmit: channel not clear , deferring tx for 20ms");
+    ESP_LOGD(TAG, "CAD channel not clear , deferring tx for 20ms");
     this->set_timeout("maybe_transmit_queued_packet", 20, [this](){ this->maybe_transmit_queued_packet(); });
   } 
 

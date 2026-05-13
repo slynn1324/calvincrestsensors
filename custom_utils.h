@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <cstdlib>  // strtof, strtol, strtoul
+#include "esp_system.h"
 
 struct LoraMsg {
   bool valid = false;
@@ -65,4 +66,41 @@ inline LoraMsg parse_lora_msg(const std::string& raw, float rssi, float snr) {
   result.snr = snr;
   result.valid = true;
   return result;
+}
+
+inline const char* get_reset_reason() {
+    esp_reset_reason_t reason = esp_reset_reason();
+    switch (reason) {
+        case ESP_RST_POWERON:   return "power-on";
+        case ESP_RST_EXT:       return "external pin";
+        case ESP_RST_SW:        return "software";
+        case ESP_RST_PANIC:     return "panic/exception";
+        case ESP_RST_INT_WDT:   return "interrupt watchdog";
+        case ESP_RST_TASK_WDT:  return "task watchdog";
+        case ESP_RST_WDT:       return "other watchdog";
+        case ESP_RST_DEEPSLEEP: return "deep sleep wakeup";
+        case ESP_RST_BROWNOUT:  return "brownout";
+        case ESP_RST_SDIO:      return "SDIO";
+        case ESP_RST_UNKNOWN:   // fallthrough
+        default:                return "unknown";
+    }
+}
+
+std::string strip_ansi(const std::string& input) {
+    std::string result;
+    result.reserve(input.size());
+    size_t i = 0;
+    while (i < input.size()) {
+        if (input[i] == '\x1b' && i + 1 < input.size() && input[i+1] == '[') {
+            // skip ESC [ ... <final byte (0x40–0x7E)>
+            i += 2;
+            while (i < input.size() && !(input[i] >= 0x40 && input[i] <= 0x7E)) {
+                i++;
+            }
+            i++; // skip the final byte
+        } else {
+            result += input[i++];
+        }
+    }
+    return result;
 }

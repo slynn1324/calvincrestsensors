@@ -467,7 +467,8 @@ class BLELoggerClient:
     def _make_disconnected_callback(self, stop_event: asyncio.Event):
         def _callback(client: BleakClient) -> None:
             self._rprint(f"\n{RED}[{ts()}] Bluetooth connection lost.{RESET}")
-            self._term.clear()
+            if self._term:
+                self._term.clear()
             stop_event.set()
         return _callback
 
@@ -478,19 +479,18 @@ class BLELoggerClient:
     ) -> None:
         """Declare all keyboard shortcuts for this session."""
 
-        term.bind("q",  self._on_quit,                    "Disconnect and quit")
-        term.bind("\x03", self._on_quit, hidden=True)     # Ctrl-C alias
+        # Simple fire-and-forget commands — use the _cmd() factory.
+        term.bind("c",  self._cmd("log_config"),           "Log Config")
+        term.bind("f",  self._on_ota,                      "OTA firmware upgrade") # OTA needs interactive prompts — handled in a dedicated coroutine.
+        term.bind("m",  self._cmd("log_metrics"),          "Log Device Metrics")
+        term.bind("p",  self._cmd("ping"),                 "Send Ping")
+        term.bind("r",  self._cmd("restart"),              "Soft-restart the device")
+        term.bind("s",  self._cmd("update_sensors"),       "Sensor Update")
+        
+        term.bind("q",  self._on_quit,                     "Disconnect and quit")
+        term.bind("\x03", self._on_quit, hidden=True)      # Ctrl-C alias
 
         term.bind("?",  lambda _: term.print_bindings(),  "Show keyboard shortcuts")
-
-        # Simple fire-and-forget commands — use the _cmd() factory.
-        term.bind("c",  self._cmd("log_config"),           "Request log_config from device")
-        term.bind("p",  self._cmd("ping"),                 "Send ping command to device")
-        term.bind("s",  self._cmd("update_sensors"),       "Request immediate sensor update")
-        term.bind("r",  self._cmd("restart"),              "Soft-restart the device")
-
-        # OTA needs interactive prompts — handled in a dedicated coroutine.
-        term.bind("f",  self._on_ota,                      "OTA firmware upgrade")
 
         term.on_unhandled_key(self._on_unknown_key)
 
@@ -631,9 +631,11 @@ class BLELoggerClient:
             await self._client.write_gatt_char(
                 CMD_CHAR_UUID, payload.encode("utf-8"), response=True
             )
-            self._rprint(f"{GREEN}[{ts()}] CMD sent: {payload}{RESET}")
+            self._term.set_status(f"  CMD sent: {payload}", timeout=3.0)
+            #self._rprint(f"{GREEN}[{ts()}] CMD sent: {payload}{RESET}")
         except Exception as e:
-            self._rprint(f"{RED}[{ts()}] Failed to send cmd '{payload}': {e}{RESET}")
+            # self._rprint(f"{RED}[{ts()}] Failed to send cmd '{payload}': {e}{RESET}")
+            self._term.set_status(f"  Failed to send cmd '{payload}: {e}", timeout=3.0)
 
     # ── OTA firmware upload ────────────────────────────────────────────────────
 
@@ -653,9 +655,10 @@ class BLELoggerClient:
 
         except FileNotFoundError:
             self._term.set_status("  OTA Failed: File Not Found", timeout=5.0)
-        except ValueError as e:
+        except Exception as e:
             self._rprint(f"{RED}[OTA] OTA Failed: {e}{RESET}")
             self._term.set_status(f"  OTA Failed: {e}", timeout=5.0)
+       
 
     def _on_ota_progress(self, pct: int, rate: float, elapsed: float, eta: float) -> None:
         filled   = "█" * (pct // 5)
@@ -696,6 +699,7 @@ def _filter_devices(devices, name_suffix: str | None) -> list:
 
 
 def _prompt_device_selection(devices) -> str:
+    devices = sorted(devices, key=lambda d: d.name.lower())
     print(f"{YELLOW}Multiple devices found:{RESET}\n")
     for i, d in enumerate(devices, 1):
         print(f"  {BOLD}{i}{RESET}  {d.name:<20}  {d.address}")
