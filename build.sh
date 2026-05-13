@@ -6,4 +6,4 @@ VERSION="${GIT_REV}${GIT_DIRTY}.${BUILD_TIME}"
 
 echo "Building version: $VERSION"
 
-esphome -s build_version "$VERSION" compile node.yaml
+esphome -s build_version "$VERSION" compile "$1"

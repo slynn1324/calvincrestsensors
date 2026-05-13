@@ -798,16 +798,16 @@ script:
           ESP_LOGI("metrics", "    TX Last Time: %lu ms", id(tx_last_time));
           ESP_LOGI("metrics", "    TX Count: %lu", id(tx_count)); 
           
-  - id: ble_log_drain
-    mode: single  # don't re-enter if already running
-    then:
-      - while:
-          condition:
-            lambda: 'return !id(ble_log_queue).empty();'
-          then:
-            - lambda: |-
-                std::string msg = id(ble_log_queue).front();
-                id(ble_log_queue).pop();
-                id(ble_log_char).set_value(msg);
-                id(ble_log_char).notify();
-            - delay: 20ms
+  # - id: ble_log_drain
+  #   mode: single  # don't re-enter if already running
+  #   then:
+  #     - while:
+  #         condition:
+  #           lambda: 'return !id(ble_log_queue).empty();'
+  #         then:
+  #           - lambda: |-
+  #               std::string msg = id(ble_log_queue).front();
+  #               id(ble_log_queue).pop();
+  #               id(ble_log_char).set_value(msg);
+  #               id(ble_log_char).notify();
+  #           - delay: 20ms

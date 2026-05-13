@@ -244,7 +244,7 @@ class RawTerminalWithStatusBar(RawTerminal):
 
     # ── Text-entry prompt ──────────────────────────────────────────────────────
 
-    async def prompt(self, prefix: str, *, stop_event: asyncio.Event) -> str | None:
+    async def prompt(self, prefix: str, *, stop_event: asyncio.Event, default_value: str = "") -> str | None:
         """
         Display an inline text-entry prompt in the status bar and collect a
         line of input, returning the string when the user presses Enter.
@@ -255,8 +255,8 @@ class RawTerminalWithStatusBar(RawTerminal):
         feed keys — the loop is blocked awaiting this coroutine, so it cannot
         read keys concurrently.
         """
-        buffer = ""
-        self.set_status(prefix, input_mode=True)
+        buffer = default_value
+        self.set_status(f"{prefix}{buffer}", input_mode=True)
 
         try:
             while not stop_event.is_set():
@@ -514,8 +514,12 @@ class BLELoggerClient:
 
     async def _on_ota(self, _key: str) -> None:
         """Prompt for firmware path and password, then kick off the OTA upload."""
+        default_path = f".esphome/build/{self._client.name}/.pioenvs/{self._client.name}/firmware.ota.bin" # default to the bridge build
+        if not self._client.name.endswith("-bridge") and self._client.name.startswith("node-"): # if its a node, but not the bridge... use the node build
+            default_path = f".esphome/build/ccsnode/.pioenvs/ccsnode/firmware.ota.bin"
         path = await self._term.prompt(
             "OTA Upload -- firmware path (.ota.bin): ",
+            default_value=default_path,
             stop_event=self._stop_event,
         )
         if not path:

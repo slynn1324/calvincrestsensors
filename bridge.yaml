@@ -1,11 +1,38 @@
+substitutions:
+  build_version: "dev"
+
 globals:
   - id: dev_short_name
     type: std::string
     restore_value: no
     initial_value: '""'
 
+  - id: ble_log_queue
+    type: std::queue<std::string>
+    restore_value: no
+
   - id: last_lora_msg_time
     type: unsigned long
+    restore_value: no
+    initial_value: '0'
+
+  - id: tx_last_time
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: tx_count
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: rx_last_time
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: rx_count
+    type: int
     restore_value: no
     initial_value: '0'
 
@@ -50,15 +77,13 @@ logger:
   level: DEBUG
   on_message:
     level: DEBUG
-    then:
-      - ble_server.characteristic.set_value:
-          id: ble_log_char
-          value: 
-            data: !lambda |-
-              std::string msg = message;
-              return std::vector<uint8_t>(msg.length() < 7 ? msg.begin() : msg.begin()+7, msg.length() < 7 ? msg.end() : msg.end()-4);
-      - ble_server.characteristic.notify:
-          id: ble_log_char
+    then: 
+      - lambda: |-
+          if (id(ble_log_queue).size() < 500){
+            id(ble_log_queue).push(strip_ansi(message));
+          } else if (id(ble_log_queue).size() < 501 ){
+            id(ble_log_queue).push("WARNING! BLE_LOG_QUEUE OVERFLOW! MESSAGES WERE SKIPPED!");
+          }
 
 esp32_ble_server:
   services:
@@ -112,6 +137,11 @@ esp32_ble_server:
                       ESP_LOGI("ble_cmd_char", "Received update_sensors command over BLE, running sensor_update_script...");
                       id(sensor_update_script).execute();
                     
+                    } else if ( cmd == "log_metrics" ){
+
+                      ESP_LOGI("ble_cmd_char", "Received log_metrics command over BLE, running log_metrics...");
+                      id(log_metrics).execute();
+                    
                     } else if ( cmd == "restart" ){
                     
                       ESP_LOGI("ble_cmd_char", "Received restart command over BLE, running restart script...");
@@ -130,6 +160,7 @@ wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   fast_connect: true
+  reboot_timeout: 0s # disable automatic reboot on wifi loss
 
 web_server:
   port: 80  
@@ -139,6 +170,7 @@ mqtt:
   username: !secret mqtt_username
   password: !secret mqtt_password
   topic_prefix: "ccs/bridge"
+  reboot_timeout: 0s # disable automatic reboot on mqtt loss
 
 # -------------------------------------------------------------------------
 # GPIO Pin Control
@@ -186,7 +218,7 @@ display:
     address: 0x3C
     update_interval: 1s
     lambda: |-
-       it.print(0, 0, id(mono_12), App.get_name().c_str());
+       it.print(0, 0, id(mono_12), id(dev_short_name).c_str());
        it.printf(50, 0, id(mono_12), "up: %0.f", id(dev_uptime).state);
 
        if ( id(last_lora_msg).state.length() > 0 ){
@@ -335,6 +367,8 @@ sx126x_cad:
     then:
       - lambda: |-
           // handle receiving a LORA packet
+          id(rx_last_time) = millis();
+          id(rx_count)++;
 
           std::string pkt(x.begin(), x.end());
           ESP_LOGI("lora_rx", "RX [%d bytes] RSSI=%.0f dBm SNR=%.1f dB: %s",
@@ -379,6 +413,15 @@ interval:
       - delay: 2s
       - button.press: restart_btn
 
+  - interval: 50ms
+    then:
+      - lambda: |-
+          if (id(ble_log_queue).empty()) return;
+          std::string msg = strip_ansi(id(ble_log_queue).front());
+          id(ble_log_queue).pop();
+          id(ble_log_char).set_value(msg);
+          id(ble_log_char).notify();
+
   # don't leave this running, it gets HOT.  Way too fast of a duty cycle on transmit for continuous use.
   # - interval: 100ms
   #   then:
@@ -399,19 +442,13 @@ script:
     parameters:
       msg: string
     then:
-      # - sx126x.set_mode_standby: # ensure the radio is in standby before toggling the PA for transmission
-      # - delay: 10ms
-      # - sx126x.set_mode_tx: # set the radio to TX mode, which should automatically set the RF switch to the PA path if rf_switch is working correctly
-      # - output.turn_on: lora_pa_ctx
-      # - delay: 10ms
       - sx126x.async_send_packet:
           data: !lambda |-
+            id(tx_last_time) = millis();
+            id(tx_count)++;
             ESP_LOGD("lora_tx", "TX: %s", msg.c_str());
             return std::vector<uint8_t>(msg.begin(), msg.end());
-      # - delay: 50ms
-      # - output.turn_off: lora_pa_ctx
-      # - delay: 10ms
-      # - sx126x.set_mode_rx: # return to RX mode after transmission to listen for
+      
 
   - id: send_pong
     mode: queued
@@ -455,3 +492,22 @@ script:
       - lambda: |-
           ESP_LOGI("restart_script", "Restarting node via script command");
       - button.press: restart_btn
+
+  - id: log_metrics
+    then:
+      - lambda: |-
+          ESP_LOGI("metrics", "Device Metrics");
+          ESP_LOGI("metrics", "  Device Name: %s", App.get_name().c_str());
+          ESP_LOGI("metrics", "  Short Name: %s", id(dev_short_name).c_str());
+          ESP_LOGI("metrics", "  Build Version: ${build_version}");
+          ESP_LOGI("metrics", "  Uptime: %lu ms", millis());
+          ESP_LOGI("metrics", "  Reset Reason: %s", get_reset_reason());
+          ESP_LOGI("metrics", "  Memory:");
+          ESP_LOGI("metrics", "    Free Heap: %u", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+          ESP_LOGI("metrics", "    Largest Free Block: %u", heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+          ESP_LOGI("metrics", "    Minimum Free Size: %u", heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)); 
+          ESP_LOGI("metrics", "  LORA Messages:");
+          ESP_LOGI("metrics", "    RX Last Time: %lu ms", id(rx_last_time));
+          ESP_LOGI("metrics", "    RX Count: %lu", id(rx_count));
+          ESP_LOGI("metrics", "    TX Last Time: %lu ms", id(tx_last_time));
+          ESP_LOGI("metrics", "    TX Count: %lu", id(tx_count)); 
